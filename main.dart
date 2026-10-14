@@ -44,7 +44,6 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
   double _progressValue = 0.0;
   String? _generatedPdfPath;
 
-  // Album dimensions in Inches
   final Map<String, Size> _albumSizes = {
     "12x36": const Size(36.0, 12.0),
     "24x36": const Size(36.0, 24.0),
@@ -79,36 +78,16 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  // Auto-enhance photo: Exposure leveling, vibrant color boost, gentle skin softening
   img.Image _autoEnhanceAndRetouch(img.Image original) {
-    // 1. Auto Levels / Contrast Normalization
     img.Image enhanced = img.normalize(original, min: 0, max: 255);
-
-    // 2. Adjust Brightness & Saturation for Indian Wedding tones (warm, vibrant colors)
     enhanced = img.adjustColor(
       enhanced,
-      brightness: 1.05,
-      contrast: 1.08,
-      saturation: 1.12,
+      brightness: 1.04,
+      contrast: 1.06,
+      saturation: 1.10,
     );
 
-    // 3. Gentle Skin Smoothing (Gaussian blur blend to soften blemishes without losing sharpness)
-    img.Image blurred = img.gaussianBlur(img.Image.from(enhanced), radius: 2);
-    // Blend blurred layer at 35% opacity with sharp original
-    for (int y = 0; y < enhanced.height; y++) {
-      for (int x = 0; x < enhanced.width; x++) {
-        final origPixel = enhanced.getPixel(x, y);
-        final blurPixel = blurred.getPixel(x, y);
-
-        // Soft skin blend
-        final r = (origPixel.r * 0.65 + blurPixel.r * 0.35).round();
-        final g = (origPixel.g * 0.65 + blurPixel.g * 0.35).round();
-        final b = (origPixel.b * 0.65 + blurPixel.b * 0.35).round();
-
-        enhanced.setPixelRgb(x, y, r, g, b);
-      }
-    }
-
+    enhanced = img.smooth(enhanced, weight: 1);
     return enhanced;
   }
 
@@ -127,14 +106,10 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
     try {
       final pdf = pw.Document();
       final sizeConfig = _albumSizes[_selectedSize]!;
-      // PDF points: 1 inch = 72 points
       final pdfPageWidth = sizeConfig.width * PdfPageFormat.inch;
       final pdfPageHeight = sizeConfig.height * PdfPageFormat.inch;
       final pageFormat = PdfPageFormat(pdfPageWidth, pdfPageHeight);
 
-      // Sheet layout logic:
-      // For 12x36: 4 photos per sheet (horizontal row)
-      // For 24x36: 6 photos per sheet (2 rows x 3 columns)
       final int photosPerSheet = (_selectedSize == "24x36") ? 6 : 4;
       final int totalPhotos = _selectedImages.length;
       final int totalSheets = (totalPhotos / photosPerSheet).ceil();
@@ -149,29 +124,29 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
         for (int p = 0; p < currentBatch.length; p++) {
           int currentGlobalIndex = start + p + 1;
           setState(() {
-            _statusMessage = "Retouching Photo $currentGlobalIndex of $totalPhotos...";
+            _statusMessage = "Enhancing Photo $currentGlobalIndex of $totalPhotos...";
             _progressValue = currentGlobalIndex / totalPhotos;
           });
 
-          // Read image
           Uint8List bytes = await currentBatch[p].readAsBytes();
           img.Image? decoded = img.decodeImage(bytes);
 
           if (decoded != null) {
-            // Auto enhance & skin retouch
+            if (decoded.width > 3000 || decoded.height > 3000) {
+              decoded = img.copyResize(decoded, width: decoded.width > decoded.height ? 2400 : null, height: decoded.height >= decoded.width ? 2400 : null);
+            }
+
             img.Image retouched = _autoEnhanceAndRetouch(decoded);
             processedBytesList.add(Uint8List.fromList(img.encodeJpg(retouched, quality: 92)));
           }
         }
 
-        // Add sheet to PDF
         pdf.addPage(
           pw.Page(
             pageFormat: pageFormat,
             margin: const pw.EdgeInsets.all(18),
             build: (pw.Context ctx) {
               if (_selectedSize == "24x36") {
-                // 2 Rows x 3 Cols
                 return pw.Column(
                   mainAxisAlignment: pw.MainAxisAlignment.spaceEvenly,
                   children: [
@@ -204,7 +179,6 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
                   ],
                 );
               } else {
-                // Single Row (12x36 / 12x30 / 12x18)
                 return pw.Row(
                   mainAxisAlignment: pw.MainAxisAlignment.spaceEvenly,
                   children: processedBytesList.map((b) {
@@ -222,11 +196,6 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
         );
       }
 
-      setState(() {
-        _statusMessage = "Saving Print PDF...";
-      });
-
-      // Save PDF to Documents/Downloads folder
       final outputDir = await getApplicationDocumentsDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final file = File("${outputDir.path}/WeddingAlbum_${_selectedSize}_$timestamp.pdf");
@@ -236,16 +205,16 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
         _isProcessing = false;
         _progressValue = 1.0;
         _generatedPdfPath = file.path;
-        _statusMessage = "Album ready! Sidhe print ke liye ready hai.";
+        _statusMessage = "Album ready! Sidhe lab print bhej sakte hain.";
       });
 
-      _showSnackBar("PDF successfully create ho gayi!");
+      _showSnackBar("Print PDF ready ho gayi!");
     } catch (e) {
       setState(() {
         _isProcessing = false;
         _statusMessage = "Error: $e";
       });
-      _showSnackBar("Album banane me error aaya: $e");
+      _showSnackBar("Error: $e");
     }
   }
 
@@ -273,14 +242,13 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Banner Card
             Card(
               elevation: 3,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
+              child: const Padding(
+                padding: EdgeInsets.all(16.0),
                 child: Column(
-                  children: const [
+                  children: [
                     Icon(Icons.auto_fix_high, size: 48, color: Color(0xFFD4AF37)),
                     SizedBox(height: 10),
                     Text(
@@ -299,7 +267,6 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
             ),
             const SizedBox(height: 20),
 
-            // Select Album Sheet Size
             const Text(
               "Sheet Size Chunein:",
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
@@ -310,7 +277,7 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.pad(BorderSide(color: Colors.grey.shade300)),
+                border: Border.all(color: Colors.grey.shade300),
               ),
               child: DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
@@ -335,7 +302,6 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
             ),
             const SizedBox(height: 20),
 
-            // Pick Photos Button
             ElevatedButton.icon(
               icon: const Icon(Icons.add_photo_alternate, size: 24),
               label: Text(
@@ -354,7 +320,6 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
             ),
             const SizedBox(height: 15),
 
-            // Photos Preview Grid if selected
             if (_selectedImages.isNotEmpty) ...[
               Text(
                 "Selected Photos (${_selectedImages.length})",
@@ -384,13 +349,12 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
               const SizedBox(height: 20),
             ],
 
-            // Progress & Status Box
             Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.pad(BorderSide(color: Colors.grey.shade200)),
+                border: Border.all(color: Colors.grey.shade200),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -413,7 +377,6 @@ class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
             ),
             const SizedBox(height: 20),
 
-            // Generate Button
             ElevatedButton(
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFD4AF37),
