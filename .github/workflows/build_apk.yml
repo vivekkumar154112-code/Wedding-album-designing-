@@ -1,43 +1,511 @@
-name: Build Android APK
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:image/image.dart' as img;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:path_provider/path_provider.dart';
+import 'package:open_filex/open_filex.dart';
 
-on:
-  workflow_dispatch:
+void main() {
+  runApp(const WeddingAlbumApp());
+}
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+class WeddingAlbumApp extends StatelessWidget {
+  const WeddingAlbumApp({super.key});
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Cinematic Wedding Album Maker',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFD4AF37)),
+        useMaterial3: true,
+      ),
+      home: const AlbumHomeScreen(),
+    );
+  }
+}
 
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.19.0'
-          channel: 'stable'
+class AlbumHomeScreen extends StatefulWidget {
+  const AlbumHomeScreen({super.key});
 
-      - name: Scaffold Complete Flutter Project
-        run: |
-          mkdir temp_app
-          flutter create --org com.wedding.album temp_app
-          cp -r temp_app/android ./
-          cp -r temp_app/ios ./ 2>/dev/null || true
-          rm -rf temp_app
-          mkdir -p lib
-          [ -f main.dart ] && mv main.dart lib/ || true
-          [ -f AndroidManifest.xml ] && mv AndroidManifest.xml android/app/src/main/ || true
+  @override
+  State<AlbumHomeScreen> createState() => _AlbumHomeScreenState();
+}
 
-      - name: Install Dependencies
-        run: flutter pub get
+class _AlbumHomeScreenState extends State<AlbumHomeScreen> {
+  List<File> _selectedImages = [];
+  String _selectedSize = "12x36";
+  bool _isProcessing = false;
+  String _statusMessage = "Photos select karein (6 photos per cinematic sheet)";
+  double _progressValue = 0.0;
+  String? _generatedPdfPath;
 
-      - name: Build APK
-        run: flutter build apk --release
+  final Map<String, Size> _albumSizes = {
+    "12x36": const Size(36.0, 12.0),
+    "24x36": const Size(36.0, 24.0),
+  };
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Wedding-Album-App-Release
-          path: build/app/outputs/flutter-apk/app-release.apk
+  Future<void> _pickImages() async {
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: true,
+      );
+
+      if (result != null && result.paths.isNotEmpty) {
+        setState(() {
+          _selectedImages = result.paths
+              .whereType<String>()
+              .map((path) => File(path))
+              .toList();
+          _generatedPdfPath = null;
+          _statusMessage = "${_selectedImages.length} photos ready hain";
+          _progressValue = 0.0;
+        });
+      }
+    } catch (e) {
+      _showSnackBar("Error selecting photos: $e");
+    }
+  }
+
+  void _showSnackBar(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  // Topaz-style micro contrast & natural skin cleaner
+  img.Image _cinematicAutoEnhance(img.Image original) {
+    // 1. Levels dynamic range correction
+    img.Image enhanced = img.normalize(original, min: 0, max: 255);
+
+    // 2. Rich warm tone adjustments (Wedding Gold & Contrast)
+    enhanced = img.adjustColor(
+      enhanced,
+      brightness: 1.03,
+      contrast: 1.08,
+      saturation: 1.10,
+    );
+
+    // 3. Gentle edge-preserving smoothing
+    enhanced = img.smooth(enhanced, weight: 1);
+    return enhanced;
+  }
+
+  Future<void> _generateAlbumPdf() async {
+    if (_selectedImages.isEmpty) {
+      _showSnackBar("Pehle photos select karein!");
+      return;
+    }
+
+    setState(() {
+      _isProcessing = true;
+      _progressValue = 0.0;
+      _statusMessage = "Cinematic sheets design ho rahi hain...";
+    });
+
+    try {
+      final pdf = pw.Document();
+      final sizeConfig = _albumSizes[_selectedSize] ?? const Size(36.0, 12.0);
+      final pdfPageWidth = sizeConfig.width * PdfPageFormat.inch;
+      final pdfPageHeight = sizeConfig.height * PdfPageFormat.inch;
+      final pageFormat = PdfPageFormat(pdfPageWidth, pdfPageHeight);
+
+      // Har sheet par photo layout ke hisab se 6 photos fit hoti hain
+      const int photosPerSheet = 6;
+      final int totalPhotos = _selectedImages.length;
+      final int totalSheets = (totalPhotos / photosPerSheet).ceil();
+
+      for (int sheetIdx = 0; sheetIdx < totalSheets; sheetIdx++) {
+        int start = sheetIdx * photosPerSheet;
+        int end = (start + photosPerSheet > totalPhotos) ? totalPhotos : start + photosPerSheet;
+        List<File> currentBatch = _selectedImages.sublist(start, end);
+
+        List<Uint8List> processedBytes = [];
+
+        for (int p = 0; p < currentBatch.length; p++) {
+          int currentGlobalIndex = start + p + 1;
+          setState(() {
+            _statusMessage = "Processing Photo $currentGlobalIndex of $totalPhotos...";
+            _progressValue = currentGlobalIndex / totalPhotos;
+          });
+
+          Uint8List bytes = await currentBatch[p].readAsBytes();
+          img.Image? decoded = img.decodeImage(bytes);
+
+          if (decoded != null) {
+            if (decoded.width > 2800 || decoded.height > 2800) {
+              decoded = img.copyResize(
+                decoded,
+                width: decoded.width > decoded.height ? 2400 : null,
+                height: decoded.height >= decoded.width ? 2400 : null,
+              );
+            }
+            img.Image retouched = _cinematicAutoEnhance(decoded);
+            processedBytes.add(Uint8List.fromList(img.encodeJpg(retouched, quality: 95)));
+          }
+        }
+
+        // Agar batch me 6 se kam photos hon toh pehli photos repeat karke fill karein
+        while (processedBytes.length < 6 && processedBytes.isNotEmpty) {
+          processedBytes.add(processedBytes.first);
+        }
+
+        // Exact PSD Template Layout Build
+        pdf.addPage(
+          pw.Page(
+            pageFormat: pageFormat,
+            margin: const pw.EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            build: (pw.Context ctx) {
+              return pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                children: [
+                  // Section 1 (Left): Top Vertical/Square Mood + Bottom Framed Couple Shot
+                  pw.Expanded(
+                    flex: 28,
+                    child: pw.Column(
+                      children: [
+                        pw.Expanded(
+                          flex: 6,
+                          child: pw.Container(
+                            margin: const pw.EdgeInsets.all(6),
+                            child: pw.Image(pw.MemoryImage(processedBytes[0]), fit: pw.BoxFit.cover),
+                          ),
+                        ),
+                        pw.Expanded(
+                          flex: 4,
+                          child: pw.Container(
+                            margin: const pw.EdgeInsets.all(6),
+                            padding: const pw.EdgeInsets.all(6),
+                            decoration: pw.BoxDecoration(
+                              color: PdfColors.white,
+                              border: pw.Border.all(color: PdfColors.grey400, width: 2),
+                            ),
+                            child: pw.Image(pw.MemoryImage(processedBytes[1]), fit: pw.BoxFit.cover),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // Section 2 (Center): 2 Circular Cutout Frames + Typography Quote
+                  pw.Expanded(
+                    flex: 16,
+                    child: pw.Column(
+                      mainAxisAlignment: pw.MainAxisAlignment.center,
+                      children: [
+                        // Circle 1
+                        pw.Container(
+                          width: 140,
+                          height: 140,
+                          decoration: pw.BoxDecoration(
+                            shape: pw.BoxShape.circle,
+                            border: pw.Border.all(color: PdfColors.grey700, width: 3),
+                          ),
+                          child: pw.ClipOval(
+                            child: pw.Image(pw.MemoryImage(processedBytes[2]), fit: pw.BoxFit.cover),
+                          ),
+                        ),
+                        pw.SizedBox(height: 18),
+                        // Circle 2
+                        pw.Container(
+                          width: 140,
+                          height: 140,
+                          decoration: pw.BoxDecoration(
+                            shape: pw.BoxShape.circle,
+                            border: pw.Border.all(color: PdfColors.grey700, width: 3),
+                          ),
+                          child: pw.ClipOval(
+                            child: pw.Image(pw.MemoryImage(processedBytes[3]), fit: pw.BoxFit.cover),
+                          ),
+                        ),
+                        pw.SizedBox(height: 14),
+                        // Typography Quote Text
+                        pw.Text(
+                          '"My Shining Hours"',
+                          style: pw.TextStyle(
+                            fontSize: 16,
+                            fontWeight: pw.FontWeight.bold,
+                            color: PdfColors.grey800,
+                          ),
+                        ),
+                        pw.Text(
+                          'WEDDING MOMENTS',
+                          style: const pw.TextStyle(
+                            fontSize: 8,
+                            letterSpacing: 2,
+                            color: PdfColors.grey600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // Section 3 (Right): Grand Architecture Shot + Floating Corner Circle Frame
+                  pw.Expanded(
+                    flex: 46,
+                    child: pw.Stack(
+                      children: [
+                        // Master Background Shot
+                        pw.Positioned.fill(
+                          child: pw.Container(
+                            margin: const pw.EdgeInsets.all(6),
+                            child: pw.Image(pw.MemoryImage(processedBytes[4]), fit: pw.BoxFit.cover),
+                          ),
+                        ),
+                        // Floating Top-Right Circle Overlay Frame
+                        pw.Positioned(
+                          top: 15,
+                          right: 15,
+                          child: pw.Container(
+                            width: 155,
+                            height: 155,
+                            decoration: pw.BoxDecoration(
+                              shape: pw.BoxShape.circle,
+                              border: pw.Border.all(color: PdfColors.white, width: 4),
+                              boxShadow: const [
+                                pw.BoxShadow(color: PdfColors.black, blurRadius: 8),
+                              ],
+                            ),
+                            child: pw.ClipOval(
+                              child: pw.Image(pw.MemoryImage(processedBytes[5]), fit: pw.BoxFit.cover),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      }
+
+      final outputDir = await getApplicationDocumentsDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final file = File("${outputDir.path}/Cinematic_Wedding_${_selectedSize}_$timestamp.pdf");
+      await file.writeAsBytes(await pdf.save());
+
+      setState(() {
+        _isProcessing = false;
+        _progressValue = 1.0;
+        _generatedPdfPath = file.path;
+        _statusMessage = "Cinematic Album ready! Direct print karwa sakte hain.";
+      });
+
+      _showSnackBar("Cinematic PDF ready ho gayi!");
+    } catch (e) {
+      setState(() {
+        _isProcessing = false;
+        _statusMessage = "Error: $e";
+      });
+      _showSnackBar("Error: $e");
+    }
+  }
+
+  void _openGeneratedPdf() {
+    if (_generatedPdfPath != null) {
+      OpenFilex.open(_generatedPdfPath!);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF9F7F2),
+      appBar: AppBar(
+        title: const Text(
+          "Cinematic Wedding Album Maker",
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        backgroundColor: const Color(0xFFD4AF37),
+        foregroundColor: Colors.white,
+        elevation: 1,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Card(
+              elevation: 2,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: const Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Column(
+                  children: [
+                    Icon(Icons.auto_awesome, size: 44, color: Color(0xFFD4AF37)),
+                    SizedBox(height: 8),
+                    Text(
+                      "Cinematic PSD Auto-Engine",
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 6),
+                    Text(
+                      "• Auto Round Cutouts & Master Overlay Spreads\n• Built-in Calligraphy & Framing Typography\n• Topaz Clarity & Warm Natural Skin Finer",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.black87, height: 1.4, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+
+            const Text(
+              "Spread Size Chunein:",
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: _selectedSize,
+                  isExpanded: true,
+                  items: _albumSizes.keys.map((s) {
+                    return DropdownMenuItem(
+                      value: s,
+                      child: Text(
+                        "$s Inch Cinematic Spread",
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    );
+                  }).toList(),
+                  onChanged: _isProcessing
+                      ? null
+                      : (val) {
+                          if (val != null) setState(() => _selectedSize = val);
+                        },
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+
+            ElevatedButton.icon(
+              icon: const Icon(Icons.add_photo_alternate, size: 22),
+              label: Text(
+                _selectedImages.isEmpty
+                    ? "Select Wedding Photos"
+                    : "Photos Badlein (${_selectedImages.length} Selected)",
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1E293B),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              onPressed: _isProcessing ? null : _pickImages,
+            ),
+            const SizedBox(height: 14),
+
+            if (_selectedImages.isNotEmpty) ...[
+              Text(
+                "Selected Photos (${_selectedImages.length})",
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                height: 85,
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _selectedImages.length,
+                  itemBuilder: (ctx, idx) {
+                    return Container(
+                      margin: const EdgeInsets.only(right: 8),
+                      width: 85,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        image: DecorationImage(
+                          image: FileImage(_selectedImages[idx]),
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 18),
+            ],
+
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _statusMessage,
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  if (_isProcessing) ...[
+                    const SizedBox(height: 10),
+                    LinearProgressIndicator(
+                      value: _progressValue > 0 ? _progressValue : null,
+                      backgroundColor: Colors.grey.shade200,
+                      color: const Color(0xFFD4AF37),
+                      minHeight: 7,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFD4AF37),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              onPressed: (_selectedImages.isEmpty || _isProcessing)
+                  ? null
+                  : _generateAlbumPdf,
+              child: _isProcessing
+                  ? const SizedBox(
+                      height: 22,
+                      width: 22,
+                      child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+                    )
+                  : const Text(
+                      "Make Cinematic Print PDF",
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+            ),
+
+            if (_generatedPdfPath != null) ...[
+              const SizedBox(height: 14),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.picture_as_pdf, color: Colors.red),
+                label: const Text(
+                  "Open & Share Print PDF",
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.black87),
+                ),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: _openGeneratedPdf,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
